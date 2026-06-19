@@ -6,10 +6,12 @@ Use it only for audio you own, created, or otherwise have permission to download
 
 ## Features
 
-- `!play` accepts a YouTube URL or search query, downloads the audio, and queues it.
+- `!play` searches the local library first, then downloads from YouTube if no saved track matches.
 - `!youtube_search` shows YouTube search results and URLs.
 - `!youtube_download` downloads YouTube audio into the local library without joining voice.
-- `!local_upload`, `!local_list`, `!local_play`, and `!local_remove` manage stored audio files.
+- `!local_upload`, `!local_list`, and `!local_remove` manage stored audio files.
+- `!queue` shows the current queue, and `!queue <song name or YouTube search> [position]` queues or inserts audio.
+- `!volume` shows or sets playback volume.
 - Prefix commands for join, pause, resume, skip, stop, disconnect, queue, and now playing.
 - Per-server queue with one active player per guild.
 - Optional Discord user allow-list.
@@ -70,25 +72,30 @@ FFMPEG_EXECUTABLE=C:\path\to\ffmpeg.exe
 
 ```text
 !help
-!join
-!play youtube url or search terms
-!youtube_search search terms
-!youtube_download youtube url or search terms
-!local_upload optional title
-!local_list
-!local_play name
-!local_remove name
+!play song name, youtube url, or search terms
+!queue
+!queue song name
+!queue song name queue-position
+!nowplaying
+!volume
+!volume 0-100
 !pause
 !resume
 !skip
 !stop
+!join
 !disconnect
-!queue
-!nowplaying
+!youtube_search search terms
+!youtube_download youtube url or search terms
+!local_upload optional title
+!local_remove name
+!local_list
 ```
 
 ## Notes
 
-`!play` never streams directly from YouTube. It downloads the selected audio first, then queues the saved local file.
+`!play` never streams directly from YouTube. It first looks for a saved local match. If none exists, it downloads the selected audio, stores it locally, then queues the saved file.
+
+Use `!queue iris` to append a local match or download a new match. Use `!queue iris 1` to make it play next.
 
 Keep `ALLOWED_DISCORD_USER_IDS` set if you only want certain Discord users to download and queue audio.

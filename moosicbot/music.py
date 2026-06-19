@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Iterable
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
@@ -21,6 +22,19 @@ def _duration(seconds: int | None) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def _split_query_and_position(value: str) -> tuple[str, int | None]:
+    query = value.strip()
+    head, separator, tail = query.rpartition(" ")
+    if separator and tail.isdigit():
+        return head.strip(), int(tail)
+    return query, None
+
+
+def _looks_like_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 class MusicCog(commands.Cog):
@@ -62,27 +76,81 @@ class MusicCog(commands.Cog):
             voice_client = await channel.connect(timeout=15, reconnect=True)
         return voice_client
 
-    async def _enqueue(self, ctx: commands.Context, tracks: Iterable[TrackRequest]) -> int:
+    async def _enqueue(
+        self,
+        ctx: commands.Context,
+        tracks: Iterable[TrackRequest],
+        position: int | None = None,
+    ) -> int:
         track_list = list(tracks)
         if not track_list or ctx.guild is None:
             return 0
         player = self.players.for_guild(ctx.guild.id)
-        player.enqueue(track_list, ctx.channel)
-        return len(track_list)
+        return player.enqueue(track_list, ctx.channel, position)
+
+    async def _queue_query(
+        self,
+        ctx: commands.Context,
+        query: str,
+        position: int | None = None,
+    ) -> None:
+        if not await self._ensure_voice(ctx):
+            return
+
+        local_track = None if _looks_like_url(query) else self.local_audio.find(query)
+        if local_track:
+            request = self.local_audio.to_request(local_track, ctx.author.display_name)
+            queued_position = await self._enqueue(ctx, [request], position)
+            if position is None:
+                await ctx.reply(f"Queued saved track **{local_track.title}**.", mention_author=False)
+            else:
+                await ctx.reply(f"Inserted saved track **{local_track.title}** at queue position {queued_position}.", mention_author=False)
+            return
+
+        await ctx.reply("Downloading audio...", mention_author=False)
+        async with ctx.typing():
+            try:
+                track = await self.youtube.download(query)
+            except Exception as exc:
+                await ctx.reply(f"I could not download that audio: `{exc}`", mention_author=False)
+                return
+
+        request = self.local_audio.to_request(track, ctx.author.display_name)
+        queued_position = await self._enqueue(ctx, [request], position)
+        if position is None:
+            await ctx.reply(f"Downloaded and queued **{track.title}**.", mention_author=False)
+        else:
+            await ctx.reply(f"Downloaded and inserted **{track.title}** at queue position {queued_position}.", mention_author=False)
 
     @commands.command(name="help", aliases=["commands"])
     async def help_command(self, ctx: commands.Context) -> None:
         prefix = self.settings.command_prefix
         lines = [
-            f"`{prefix}play <youtube url or search>` - download and queue audio",
-            f"`{prefix}youtube_search <search>` - show YouTube results",
-            f"`{prefix}youtube_download <youtube url or search>` - download without queueing",
-            f"`{prefix}local_upload [title]` - attach an audio file and store it",
-            f"`{prefix}local_list` - list saved audio",
-            f"`{prefix}local_play <name>` - queue saved audio",
-            f"`{prefix}local_remove <name>` - remove saved audio",
-            f"`{prefix}join`, `{prefix}pause`, `{prefix}resume`, `{prefix}skip`, `{prefix}stop`, `{prefix}disconnect`",
-            f"`{prefix}queue`, `{prefix}nowplaying`",
+            "**MoosicBot Commands**",
+            "",
+            "**Play And Queue**",
+            f"`{prefix}play <song or URL>` - Play a saved match first; otherwise download from YouTube and queue it.",
+            f"`{prefix}queue` - Show the current song and upcoming songs.",
+            f"`{prefix}queue <song or URL> [position]` - Queue or insert audio. Use position `1` to play it next.",
+            f"`{prefix}nowplaying` - Show the current song.",
+            "",
+            "**Playback Controls**",
+            f"`{prefix}volume [0-100]` - Show or set playback volume.",
+            f"`{prefix}pause` - Pause the current song.",
+            f"`{prefix}resume` - Resume paused playback.",
+            f"`{prefix}skip` - Skip the current song.",
+            f"`{prefix}stop` - Stop playback and clear the queue.",
+            f"`{prefix}join` - Join your voice channel.",
+            f"`{prefix}disconnect` - Leave voice and clear the queue.",
+            "",
+            "**YouTube**",
+            f"`{prefix}youtube_search <search>` - Show YouTube results without downloading.",
+            f"`{prefix}youtube_download <song or URL>` - Download audio into the library without queueing it.",
+            "",
+            "**Local Library**",
+            f"`{prefix}local_upload [title]` - Attach an audio file and save it locally.",
+            f"`{prefix}local_remove <name>` - Remove a saved audio file.",
+            f"`{prefix}local_list` - Show saved local songs.",
         ]
         await ctx.reply("\n".join(lines), mention_author=False)
 
@@ -168,22 +236,6 @@ class MusicCog(commands.Cog):
             lines.append(f"...and {len(tracks) - 20} more.")
         await ctx.reply("\n".join(lines), mention_author=False)
 
-    @commands.command(name="local_play", aliases=["lp"])
-    async def local_play(self, ctx: commands.Context, *, name: str) -> None:
-        if not await self._guard(ctx):
-            return
-        if not await self._ensure_voice(ctx):
-            return
-
-        track = self.local_audio.find(name)
-        if not track:
-            await ctx.reply("I could not find a local track matching that name.", mention_author=False)
-            return
-
-        request = self.local_audio.to_request(track, ctx.author.display_name)
-        await self._enqueue(ctx, [request])
-        await ctx.reply(f"Queued local track **{track.title}**.", mention_author=False)
-
     @commands.command(name="local_remove", aliases=["remove", "delete"])
     async def local_remove(self, ctx: commands.Context, *, name: str) -> None:
         if not await self._guard(ctx):
@@ -214,20 +266,25 @@ class MusicCog(commands.Cog):
     async def play(self, ctx: commands.Context, *, query: str) -> None:
         if not await self._guard(ctx):
             return
-        if not await self._ensure_voice(ctx):
+        await self._queue_query(ctx, query)
+
+    @commands.command(name="volume", aliases=["vol"])
+    async def volume(self, ctx: commands.Context, level: int | None = None) -> None:
+        if not await self._guard(ctx):
+            return
+        if ctx.guild is None:
             return
 
-        await ctx.reply("Downloading audio...", mention_author=False)
-        async with ctx.typing():
-            try:
-                track = await self.youtube.download(query)
-            except Exception as exc:
-                await ctx.reply(f"I could not download that audio: `{exc}`", mention_author=False)
-                return
+        player = self.players.for_guild(ctx.guild.id)
+        if level is None:
+            await ctx.reply(f"Volume is currently {round(player.volume * 100)}%.", mention_author=False)
+            return
+        if level < 0 or level > 100:
+            await ctx.reply("Volume must be between 0 and 100.", mention_author=False)
+            return
 
-        request = self.local_audio.to_request(track, ctx.author.display_name)
-        await self._enqueue(ctx, [request])
-        await ctx.reply(f"Downloaded and queued **{track.title}**.", mention_author=False)
+        player.set_volume(level / 100)
+        await ctx.reply(f"Volume set to {level}%.", mention_author=False)
 
     @commands.command(name="pause")
     async def pause(self, ctx: commands.Context) -> None:
@@ -280,9 +337,17 @@ class MusicCog(commands.Cog):
         await ctx.reply("Disconnected.", mention_author=False)
 
     @commands.command(name="queue", aliases=["q"])
-    async def queue(self, ctx: commands.Context) -> None:
+    async def queue(self, ctx: commands.Context, *, query: str = "") -> None:
         if not await self._guard(ctx):
             return
+        if query:
+            song_query, position = _split_query_and_position(query)
+            if not song_query:
+                await ctx.reply("Tell me which song to queue.", mention_author=False)
+                return
+            await self._queue_query(ctx, song_query, position)
+            return
+
         player = self.players.for_guild(ctx.guild.id) if ctx.guild else None
         if not player or (not player.now_playing and not player.queue):
             await ctx.reply("The queue is empty.", mention_author=False)

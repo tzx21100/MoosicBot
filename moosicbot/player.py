@@ -65,12 +65,30 @@ class GuildPlayer:
         self._next_event = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
 
-    def enqueue(self, tracks: list[TrackRequest], text_channel: discord.abc.Messageable | None) -> None:
-        self.queue.extend(tracks)
+    def enqueue(
+        self,
+        tracks: list[TrackRequest],
+        text_channel: discord.abc.Messageable | None,
+        position: int | None = None,
+    ) -> int:
+        insert_index = len(self.queue)
+        if position is None:
+            self.queue.extend(tracks)
+        else:
+            insert_index = max(0, min(position - 1, len(self.queue)))
+            for offset, track in enumerate(tracks):
+                self.queue.insert(insert_index + offset, track)
         if text_channel:
             self.text_channel = text_channel
         if not self._runner or self._runner.done():
             self._runner = asyncio.create_task(self._play_loop(), name=f"guild-player-{self.guild_id}")
+        return insert_index + 1
+
+    def set_volume(self, volume: float) -> None:
+        self.volume = max(0.0, min(1.0, volume))
+        voice = self.voice_client
+        if voice and isinstance(voice.source, discord.PCMVolumeTransformer):
+            voice.source.volume = self.volume
 
     def skip(self) -> bool:
         voice = self.voice_client
