@@ -1,0 +1,1 @@
+"""MoosicBot Discord music player."""
