@@ -16,6 +16,7 @@ class Settings:
     default_volume: float
     ffmpeg_executable: str | None
     local_music_dir: Path
+    lyrics_api_base: str
     youtube_search_limit: int
     ytdlp_default_search: str
 
@@ -56,6 +57,8 @@ def load_settings() -> Settings:
         default_volume=_float_between("DEFAULT_VOLUME", 0.55, 0.0, 1.0),
         ffmpeg_executable=os.getenv("FFMPEG_EXECUTABLE", "").strip() or None,
         local_music_dir=local_music_dir,
+        lyrics_api_base=os.getenv("LYRICS_API_BASE", "https://lrclib.net/api").strip()
+        or "https://lrclib.net/api",
         youtube_search_limit=int(os.getenv("YOUTUBE_SEARCH_LIMIT", "5")),
         ytdlp_default_search=os.getenv("YTDLP_DEFAULT_SEARCH", "ytsearch").strip() or "ytsearch",
     )

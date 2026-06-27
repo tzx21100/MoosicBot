@@ -8,10 +8,20 @@ from discord.ext import commands
 
 from moosicbot.config import Settings
 from moosicbot.local_audio import LocalAudioLibrary
+from moosicbot.lyrics import (
+    LyricsLookupError,
+    LyricsNotFound,
+    LyricsResult,
+    LyricsService,
+)
 from moosicbot.models import TrackRequest
 from moosicbot.player import PlayerRegistry
 from moosicbot.sources import SourceResolver
 from moosicbot.youtube import YouTubeAudioService
+
+
+DISCORD_MESSAGE_LIMIT = 2000
+LYRICS_CHUNK_LIMIT = 1850
 
 
 def _duration(seconds: int | None) -> str:
@@ -37,6 +47,30 @@ def _looks_like_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _code_block(value: str) -> str:
+    return f"```text\n{value.replace('```', '` ` `')}\n```"
+
+
+def _split_message(value: str, limit: int = LYRICS_CHUNK_LIMIT) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for line in value.splitlines():
+        next_line = line if not current else f"\n{line}"
+        if len(current) + len(next_line) <= limit:
+            current += next_line
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
+        current = line
+    if current:
+        chunks.append(current)
+    return chunks or [""]
+
+
 class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot, settings: Settings) -> None:
         self.bot = bot
@@ -44,6 +78,7 @@ class MusicCog(commands.Cog):
         self.resolver = SourceResolver(settings.ytdlp_default_search)
         self.local_audio = LocalAudioLibrary(settings.local_music_dir)
         self.youtube = YouTubeAudioService(self.local_audio, settings.ytdlp_default_search)
+        self.lyrics = LyricsService(settings.lyrics_api_base)
         self.players = PlayerRegistry(bot, self.resolver, settings.default_volume, settings.ffmpeg_executable)
 
     def cog_unload(self) -> None:
@@ -133,6 +168,7 @@ class MusicCog(commands.Cog):
             f"`{prefix}queue` - Show the current song and upcoming songs.",
             f"`{prefix}queue <song or URL> [position]` - Queue or insert audio. Use position `1` to play it next.",
             f"`{prefix}nowplaying` - Show the current song.",
+            f"`{prefix}lyric [song]` - Find lyrics for a song, or for the current song if omitted.",
             "",
             "**Playback Controls**",
             f"`{prefix}volume [0-100]` - Show or set playback volume.",
@@ -153,6 +189,59 @@ class MusicCog(commands.Cog):
             f"`{prefix}local_list` - Show saved local songs.",
         ]
         await ctx.reply("\n".join(lines), mention_author=False)
+
+    async def _send_lyrics(self, ctx: commands.Context, result: LyricsResult) -> None:
+        safe_title = discord.utils.escape_markdown(result.display_title)
+        if result.instrumental and not result.lyrics:
+            await ctx.reply(f"LRCLIB marks **{safe_title}** as instrumental.", mention_author=False)
+            return
+
+        chunks = _split_message(result.lyrics)
+        header = f"**Lyrics: {safe_title}**\nSource: {result.provider}\n"
+        first = f"{header}{_code_block(chunks[0])}"
+        if len(first) > DISCORD_MESSAGE_LIMIT:
+            remaining = DISCORD_MESSAGE_LIMIT - len(header) - len("```text\n\n```")
+            chunks = _split_message(result.lyrics, max(500, remaining))
+            first = f"{header}{_code_block(chunks[0])}"
+
+        await ctx.reply(first, mention_author=False)
+        for chunk in chunks[1:]:
+            await ctx.send(_code_block(chunk))
+
+    def _current_lyrics_target(self, ctx: commands.Context) -> tuple[str, int | None] | None:
+        player = self.players.for_guild(ctx.guild.id) if ctx.guild else None
+        if not player or not player.now_playing:
+            return None
+        if player.now_resolved:
+            return player.now_resolved.title, player.now_resolved.duration
+        return player.now_playing.title, player.now_playing.duration
+
+    @commands.command(name="lyric", aliases=["lyrics"])
+    async def lyric(self, ctx: commands.Context, *, query: str = "") -> None:
+        if not await self._guard(ctx):
+            return
+
+        lookup_query = query.strip()
+        duration = None
+        if not lookup_query:
+            current = self._current_lyrics_target(ctx)
+            if not current:
+                await ctx.reply("Tell me which song to look up, or start playback first.", mention_author=False)
+                return
+            lookup_query, duration = current
+
+        async with ctx.typing():
+            try:
+                result = await self.lyrics.search(lookup_query, duration)
+            except LyricsNotFound:
+                safe_query = discord.utils.escape_markdown(lookup_query)
+                await ctx.reply(f"I could not find lyrics for **{safe_query}** on LRCLIB.", mention_author=False)
+                return
+            except LyricsLookupError as exc:
+                await ctx.reply(f"I could not look up lyrics right now: `{exc}`", mention_author=False)
+                return
+
+        await self._send_lyrics(ctx, result)
 
     @commands.command(name="youtube_search", aliases=["ytsearch", "search"])
     async def youtube_search(self, ctx: commands.Context, *, query: str) -> None:
